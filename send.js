@@ -38,17 +38,17 @@ function currentMeeting(now) {
 }
 function longDate(iso) {
   const [y, mo, d] = iso.split("-").map(Number);
-  return new Intl.DateTimeFormat("ar-SA-u-ca-gregory-nu-arab", { weekday: "long", day: "numeric", month: "long", timeZone: "UTC" })
+  return new Intl.DateTimeFormat("ar-SA-u-ca-gregory-nu-latn", { weekday: "long", day: "numeric", month: "long", timeZone: "UTC" })
     .format(new Date(Date.UTC(y, mo - 1, d, 12))).replace("،", "");
 }
-// "الليلة" / "بكرة" / "يوم الثلاثاء ١٠ نوفمبر"
+// "الليلة" / "بكرة" / "يوم الثلاثاء 10 نوفمبر"
 function whenText(iso, today) {
   const diff = Math.round((Date.parse(iso) - Date.parse(today)) / 864e5);
   if (diff === 0) return "الليلة";
   if (diff === 1) return "بكرة";
   return "يوم " + longDate(iso);
 }
-const ar = (n) => Number(n).toLocaleString("ar-SA");
+const ar = (n) => Number(n).toLocaleString("en-US");
 const norm = (n) => String(n || "").replace(/[ً-ْـ]/g, "").replace(/[أإآ]/g, "ا").replace(/ة/g, "ه").replace(/ى/g, "ي").replace(/\s+/g, " ").trim();
 const firstName = (n) => String(n || "").trim().split(/\s+/)[0] || "";
 const val = async (path) => (await db.ref(path).once("value")).val();
@@ -172,4 +172,4 @@ async function send(tag, make, onlyName) {
     const l = (await lockRef.once("value")).val();
     if (l && l.by === me) await lockRef.remove().catch(() => {});
   }
-})().catch((e) => { console.error(e); process.exit(1); });
+})().then(() => process.exit(0)).catch((e) => { console.error(e); process.exit(1); });

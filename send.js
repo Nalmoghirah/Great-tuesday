@@ -20,6 +20,9 @@ const SITE = "https://thegreattuesday.netlify.app/";
 const TZ = "Asia/Riyadh";
 const MEETING_DAY = 2;     // Tuesday (0 = Sunday)
 const REMIND_HOUR = 12;    // noon reminder
+const LATE_HOUR = 17;      // 5pm nudge for whoever hasn't replied
+const MEET_HOUR = 19;      // meeting time
+const NAG_HOUR = 20;       // unpaid-bill reminders go out after 8pm
 const ARCHIVE_HOUR = 23;   // the site moves to next week at 11pm on Tuesday
 const TEST_NAME = (process.env.TEST_NAME || "").trim();
 
@@ -148,57 +151,75 @@ async function send(tag, make, onlyName) {
       }
     }
 
-    // ---- 4) a new bill is added (or changed) → each person in the split gets his share (once per bill)
+    // ---- 4) bills: new/changed bill → everyone is told who to pay; unpaid people are reminded
+    //         the next day, then every 2 days, until the next Tuesday (when the bill resets). Paid → nothing.
     const members = asList(await val("members"));
+    const fnOf = (id) => firstName((members.find((m) => m.id === id) || {}).name || "");
     for (const wk of [addDays(meeting, -7), meeting]) {
       const e = ((await val("week-data/" + wk)) || {}).expense;
       if (!e || !(Number(e.amount) > 0)) continue;
       const parts = asList(e.participants), exc = asList(e.excluded);
-      const eff = parts.filter((id) => !exc.includes(id));
-      if (!eff.length) continue;
-      const sig = `${e.amount}|${e.responsibleId || ""}|${eff.slice().sort().join(",")}`;
-      const bState = (await val("push-state/" + wk + "/billSig")) || "";
-      if (bState === sig) continue;
-      const share = Math.round((Number(e.amount) / eff.length) * 100) / 100;
-      const payer = members.find((m) => m.id === e.responsibleId);
-      const payerName = payer ? firstName(payer.name) : "";
-      const changed = !!bState;
-      await send("bill-" + wk, (u) => {
-        if (!eff.includes(u.memberId)) return null; // not part of this bill
-        if (u.memberId === e.responsibleId) return {
-          title: changed ? "تعدّلت فاتورة الثلاثاء 🧾" : "انسجّلت الفاتورة باسمك 🧾",
-          body: `${ar(e.amount)} ريال على ${eff.length === 2 ? "شخصين" : eff.length <= 10 ? ar(eff.length) + " أشخاص" : ar(eff.length) + " شخص"}، نصيب كل واحد ${ar(share)} ريال. التحويلات بتوصلك.`,
+      const eat = parts.filter((id) => !exc.includes(id));
+      if (!eat.length) continue;
+      const units = e.units || {};
+      const u = () => 1; // guests aren't counted in the split
+      const per = Number(e.amount) / eat.reduce((a, id) => a + u(id), 0);
+      const owe = (id) => Math.round(per * u(id) * 100) / 100;
+      const payer = fnOf(e.responsibleId);
+      const to = payer ? `لـ${payer}` : "";
+      const bank = e.bank ? ` (${e.bank})` : "";
+      const st = (await val("push-state/" + wk)) || {};
+      const sRef = db.ref("push-state/" + wk);
+      const sig = `${e.amount}|${e.responsibleId || ""}|${eat.slice().sort().join(",")}`;
+      if (st.billSig !== sig) {
+        const changed = !!st.billSig;
+        const title = changed ? "تعدّلت فاتورة القطة 🧾" : "فيه فاتورة قطة 🧾";
+        await send("bill-" + wk, (x) => {
+          if (x.memberId === e.responsibleId) return { title: changed ? "تعدّلت فاتورتك 🧾" : "انسجّلت الفاتورة باسمك 🧾", body: `${ar(e.amount)} ريال على ${eat.length === 2 ? "شخصين" : ar(eat.length) + " أشخاص"}، وبنذكّر اللي ما حوّل لين يحوّلون لك.`, link: SITE + "#bill" };
+          if (eat.includes(x.memberId)) return { title, body: `حوّلوا ${to}${bank}. نصيبك ${ar(owe(x.memberId))} ريال، وإذا حوّلت علّم من الموقع.`, link: SITE + "#bill" };
+          return { title, body: `فاتورة عشا الثلاثاء نزلت، حوّلوا ${to}. أنت ما عليك شي.`, link: SITE + "#bill" };
+        });
+        await sRef.update({ billSig: sig, billDate: st.billDate || now.date });
+        continue; // don't nag in the same run the bill was announced
+      }
+      // reminders for whoever hasn't marked "paid"
+      const start = st.billDate || now.date;
+      const days = Math.round((Date.parse(now.date) - Date.parse(start)) / 864e5);
+      const resetDay = addDays(wk, 7);
+      if (now.date >= resetDay || days < 1 || (days - 1) % 2 !== 0 || now.hour < NAG_HOUR || st.billNag === now.date) continue;
+      const paid = e.paid || {};
+      const unpaid = eat.filter((id) => id !== e.responsibleId && !paid[id]);
+      if (unpaid.length) {
+        await send("billnag-" + wk, (x) => unpaid.includes(x.memberId) ? {
+          title: "تراك ما حوّلت 💸",
+          body: `${firstName(x.name) ? firstName(x.name) + "، " : ""}باقي عليك ${ar(owe(x.memberId))} ريال ${to} من فاتورة الثلاثاء. إذا حوّلت علّم من الموقع عشان ما نذكّرك.`,
           link: SITE + "#bill",
-        };
-        return {
-          title: changed ? "تعدّلت فاتورة الثلاثاء 🧾" : "نزلت فاتورة الثلاثاء 🧾",
-          body: `نصيبك ${ar(share)} ريال${payerName ? `، حوّلها لـ${payerName}` : ""}${e.bank ? ` (${e.bank})` : ""}. اضغط عشان تنسخ الآيبان.`,
-          link: SITE + "#bill",
-        };
-      });
-      await db.ref("push-state/" + wk).update({ billSig: sig });
+        } : null);
+      }
+      await sRef.update({ billNag: now.date });
     }
 
-    // ---- 2) Tuesday noon reminder (once per Tuesday)
-    if (now.date === meeting && now.hour >= REMIND_HOUR && now.hour < ARCHIVE_HOUR && !state.remindedNoon) {
+    // ---- 2) Tuesday reminders: noon to everyone (by their reply), 5pm a nudge to whoever still hasn't replied
+    if (now.date === meeting && now.hour < ARCHIVE_HOUR) {
       const rsvp = week.rsvp || {};
       const yes = Object.values(rsvp).filter((v) => v === "coming").length;
-      const place = loc && loc.name ? ` 📍 ${loc.name}` : "";
-      const title = "الليلة الثلاثاء العظيم 🍽️";
-      await send("day-" + meeting, (u) => {
-        const r = rsvp[u.memberId];
-        const fn = firstName(u.name);
-        if (r === "not_coming") return null; // said he's not coming — don't nag
-        if (r === "coming") return {
-          title,
-          body: `حيّاك الله${fn ? " يا " + fn : ""}، ننتظرك الليلة.${yes > 1 ? ` وصرتوا ${ar(yes)} لين الحين.` : ""}${place}`,
-        };
-        return {
-          title,
-          body: `${fn ? fn + "، " : ""}للحين ما علّمتنا. بتحضر الليلة؟${yes === 1 ? " واحد أكّد لين الحين." : yes ? ` ${ar(yes)} أكّدوا لين الحين.` : ""}${place}`,
-        };
-      });
-      await stateRef.update({ remindedNoon: true });
+      const place = loc && loc.name ? ` في ${loc.name}` : "";
+      if (now.hour >= REMIND_HOUR && !state.remindedNoon) {
+        await send("day-" + meeting, (u) => {
+          const r = rsvp[u.memberId], fn = firstName(u.name);
+          if (r === "not_coming") return null;
+          if (r === "coming") return { title: "لا تنسى جمعتنا اليوم 🍽️", body: `${fn ? fn + "، " : ""}ننتظرك الليلة الساعة 7${place}.${yes > 1 ? ` وصرتوا ${ar(yes)} لين الحين.` : ""}` };
+          return { title: "لا تنسى تسجّل حضورك 📝", body: `${fn ? fn + "، " : ""}الليلة جمعتنا وللحين ما سجّلت. بتحضر؟ علّمنا من الموقع.` };
+        });
+        await stateRef.update({ remindedNoon: true });
+      } else if (now.hour >= LATE_HOUR && now.hour < MEET_HOUR && state.remindedNoon && !state.remindedLate) {
+        await send("late-" + meeting, (u) => {
+          if (rsvp[u.memberId]) return null;
+          const fn = firstName(u.name);
+          return { title: "ليه ما سجّلت للحين؟ 🤔", body: `${fn ? fn + "، " : ""}باقي ساعتين على الجمعة وما علّمتنا. سجّل حضورك أو اعتذارك من الموقع.` };
+        });
+        await stateRef.update({ remindedLate: true });
+      }
     }
   } finally {
     const l = (await lockRef.once("value")).val();

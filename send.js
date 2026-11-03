@@ -4,6 +4,7 @@
  *  1) The meeting place is set (or changed) for the coming Tuesday → everyone is told where (once per place).
  *  2) Tuesday from 12:00 noon → a reminder (once per Tuesday): who hasn't replied is asked if they're coming,
  *     who said they're coming gets a welcome, who said they're not coming gets nothing.
+ *  4) A bill is added or changed → everyone in the split gets his share and who to pay.
  *  3) The admin writes a message on the site (📣 أرسل التنبيه للكل) → it goes to everyone.
  *  Manual test: run the workflow by hand with a name → a test notification to that person only; type الكل → to everyone.
  * Needs the secret FIREBASE_SERVICE_ACCOUNT (the service-account JSON from Firebase).
@@ -145,6 +146,37 @@ async function send(tag, make, onlyName) {
         }));
         await stateRef.update({ locationSig: sig });
       }
+    }
+
+    // ---- 4) a new bill is added (or changed) → each person in the split gets his share (once per bill)
+    const members = asList(await val("members"));
+    for (const wk of [addDays(meeting, -7), meeting]) {
+      const e = ((await val("week-data/" + wk)) || {}).expense;
+      if (!e || !(Number(e.amount) > 0)) continue;
+      const parts = asList(e.participants), exc = asList(e.excluded);
+      const eff = parts.filter((id) => !exc.includes(id));
+      if (!eff.length) continue;
+      const sig = `${e.amount}|${e.responsibleId || ""}|${eff.slice().sort().join(",")}`;
+      const bState = (await val("push-state/" + wk + "/billSig")) || "";
+      if (bState === sig) continue;
+      const share = Math.round((Number(e.amount) / eff.length) * 100) / 100;
+      const payer = members.find((m) => m.id === e.responsibleId);
+      const payerName = payer ? firstName(payer.name) : "";
+      const changed = !!bState;
+      await send("bill-" + wk, (u) => {
+        if (!eff.includes(u.memberId)) return null; // not part of this bill
+        if (u.memberId === e.responsibleId) return {
+          title: changed ? "تعدّلت فاتورة الثلاثاء 🧾" : "انسجّلت الفاتورة باسمك 🧾",
+          body: `${ar(e.amount)} ريال على ${eff.length === 2 ? "شخصين" : eff.length <= 10 ? ar(eff.length) + " أشخاص" : ar(eff.length) + " شخص"}، نصيب كل واحد ${ar(share)} ريال. التحويلات بتوصلك.`,
+          link: SITE + "#bill",
+        };
+        return {
+          title: changed ? "تعدّلت فاتورة الثلاثاء 🧾" : "نزلت فاتورة الثلاثاء 🧾",
+          body: `نصيبك ${ar(share)} ريال${payerName ? `، حوّلها لـ${payerName}` : ""}${e.bank ? ` (${e.bank})` : ""}. اضغط عشان تنسخ الآيبان.`,
+          link: SITE + "#bill",
+        };
+      });
+      await db.ref("push-state/" + wk).update({ billSig: sig });
     }
 
     // ---- 2) Tuesday noon reminder (once per Tuesday)
